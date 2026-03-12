@@ -17,7 +17,7 @@ final string serviceEnv = os:getEnv("SERVICE_ENV") == "" ? "development" : os:ge
 map<Item> itemStore = {};
 
 // Cache for recently fetched items (uses ballerina/cache)
-final cache:Cache itemCache = new ({capacity: 50, evictionFactor: 0.2});
+final cache:Cache itemCache = new ({capacity: 100, evictionFactor: 0.2});
 
 type Item record {|
     string id;
