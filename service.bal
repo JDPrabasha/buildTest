@@ -8,10 +8,24 @@ import ballerina/crypto;
 import ballerina/url;
 import ballerina/os;
 import ballerina/cache;
+import ballerina/sql;
+import ballerinax/mysql;
+import ballerinax/mysql.driver as _;
+import ballerinax/oracledb;
+import ballerinax/oracledb.driver as _;
+import ballerinax/mssql;
 
 // Read config from environment (uses ballerina/os)
 final string servicePort = os:getEnv("SERVICE_PORT") == "" ? "8080" : os:getEnv("SERVICE_PORT");
 final string serviceEnv = os:getEnv("SERVICE_ENV") == "" ? "dev" : os:getEnv("SERVICE_ENV");
+
+// Configurable DB connection params
+configurable string mysqlHost = "localhost";
+configurable int mysqlPort = 3306;
+configurable string oracleHost = "localhost";
+configurable int oraclePort = 1521;
+configurable string mssqlHost = "localhost";
+configurable int mssqlPort = 1433;
 
 // In-memory store
 map<Item> itemStore = {};
@@ -43,11 +57,18 @@ type HealthResponse record {|
     int itemCount;
 |};
 
+type DbStatusResponse record {|
+    string mysql;
+    string oracledb;
+    string mssql;
+    string sampleQuery;
+|};
+
+
 service /api on new http:Listener(8080) {
 
     // GET /api/health
     resource function get health() returns HealthResponse {
-        // ballerina/time: current timestamp
         string timestamp = time:utcToString(time:utcNow());
         log:printInfo("Health check", env = serviceEnv, port = servicePort);
         io:println("Health check at: ", timestamp);
@@ -56,6 +77,27 @@ service /api on new http:Listener(8080) {
             env: serviceEnv,
             timestamp: timestamp,
             itemCount: itemStore.length()
+        };
+    }
+
+    // GET /api/db/status - dummy DB status using sql, mysql, oracledb, mssql
+    resource function get db/status() returns DbStatusResponse {
+        mysql:Options mysqlOpts = {connectTimeout: 30};
+        oracledb:Options oracleOpts = {connectTimeout: 30};
+        mssql:Options mssqlOpts = {queryTimeout: 30};
+
+        // ballerina/sql: build a parameterized query
+        string sampleId = uuid:createType4AsString();
+        sql:ParameterizedQuery query = `SELECT * FROM items WHERE id = ${sampleId}`;
+
+        log:printInfo("DB status check", mysql = mysqlHost, oracle = oracleHost, mssql = mssqlHost,
+            mysqlTimeout = mysqlOpts.connectTimeout, oracleTimeout = oracleOpts.connectTimeout,
+            mssqlTimeout = mssqlOpts.queryTimeout);
+        return {
+            mysql: string `mysql://${mysqlHost}:${mysqlPort}`,
+            oracledb: string `oracle://${oracleHost}:${oraclePort}`,
+            mssql: string `mssql://${mssqlHost}:${mssqlPort}`,
+            sampleQuery: query.strings[0]
         };
     }
 
@@ -69,7 +111,6 @@ service /api on new http:Listener(8080) {
 
     // GET /api/items/{id}
     resource function get items/[string id]() returns Item|http:NotFound {
-        // ballerina/cache: check cache first
         any|cache:Error cached = itemCache.get(id);
         if cached is Item {
             log:printInfo("Cache hit", id = id);
@@ -82,7 +123,6 @@ service /api on new http:Listener(8080) {
             return <http:NotFound>{body: string `Item '${id}' not found`};
         }
 
-        // Store in cache
         cache:Error? cacheErr = itemCache.put(id, item);
         if cacheErr is cache:Error {
             log:printWarn("Cache put failed", id = id, 'error = cacheErr);
@@ -94,28 +134,23 @@ service /api on new http:Listener(8080) {
 
     // POST /api/items
     resource function post items(@http:Payload NewItem payload) returns Item|http:BadRequest {
-        // ballerina/regex: validate name contains only allowed characters
         boolean validName = regex:matches(payload.name, "[a-zA-Z0-9 _\\-]+");
         if !validName {
             log:printWarn("Invalid item name", name = payload.name);
             return <http:BadRequest>{body: "Item name contains invalid characters"};
         }
 
-        // ballerina/uuid: generate unique ID
         string id = uuid:createType4AsString();
 
-        // ballerina/time: timestamps
         time:Utc now = time:utcNow();
         string createdAt = time:utcToString(now);
 
-        // ballerina/url: encode name as URL-safe slug
         string slug = "";
         string|url:Error encoded = url:encode(payload.name.toLowerAscii(), "UTF-8");
         if encoded is string {
             slug = regex:replaceAll(encoded, "%20|\\+", "-");
         }
 
-        // ballerina/crypto: hash description for integrity fingerprint
         byte[] hashBytes = crypto:hashSha256(payload.description.toBytes());
         string descriptionHash = hashBytes.toBase16();
 
@@ -149,17 +184,14 @@ service /api on new http:Listener(8080) {
             return <http:NotFound>{body: string `Item '${id}' not found`};
         }
 
-        // ballerina/time: update timestamp
         string updatedAt = time:utcToString(time:utcNow());
 
-        // ballerina/url: re-encode slug
         string slug = existing.slug;
         string|url:Error encoded = url:encode(payload.name.toLowerAscii(), "UTF-8");
         if encoded is string {
             slug = regex:replaceAll(encoded, "%20|\\+", "-");
         }
 
-        // ballerina/crypto: rehash description
         byte[] hashBytes = crypto:hashSha256(payload.description.toBytes());
         string descriptionHash = hashBytes.toBase16();
 
@@ -176,7 +208,6 @@ service /api on new http:Listener(8080) {
 
         itemStore[id] = updated;
 
-        // Invalidate cache
         cache:Error? removeErr = itemCache.invalidate(id);
         if removeErr is cache:Error {
             log:printWarn("Cache invalidate failed", id = id);
@@ -194,7 +225,6 @@ service /api on new http:Listener(8080) {
         }
         _ = itemStore.remove(id);
 
-        // Invalidate cache
         cache:Error? invalidateErr = itemCache.invalidate(id);
         if invalidateErr is cache:Error {
             log:printWarn("Cache invalidate failed on delete", id = id);
