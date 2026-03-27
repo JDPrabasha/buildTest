@@ -1,0 +1,8 @@
+target/
+.DS_Store
+.idea/
+.vscode/
+.cursor/
+.cursor/
+autocommit.sh
+autocommit.log
